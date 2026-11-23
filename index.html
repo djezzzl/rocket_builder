@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Brick Rocket</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section id="garage" class="screen">
+    <header class="topbar">
+      <h1>🚀 Brick Rocket</h1>
+      <div class="pill">🪙 <span id="g-coins">0</span></div>
+      <div class="pill">🏆 <span id="g-best">0</span> m</div>
+    </header>
+    <div class="garage-body">
+      <aside class="palette" id="palette"></aside>
+      <div class="build-area">
+        <div class="hint" id="g-hint">Pick a brick, then tap the plate to place it. Tap a brick to take it back.</div>
+        <div class="plate-wrap" id="plate-wrap"><div class="front">▲ FRONT ▲</div><canvas id="plate"></canvas></div>
+        <div class="paints" id="paints"></div>
+      </div>
+      <aside class="side">
+        <div class="stats" id="stats"></div>
+        <div class="errors" id="errors"></div>
+        <button class="btn secondary" id="btn-upgrade"></button>
+        <button class="btn launch" id="btn-launch">LAUNCH! 🚀</button>
+        <button class="btn tiny" id="btn-reset">Start over</button>
+      </aside>
+    </div>
+  </section>
+
+  <section id="flight" class="screen hidden">
+    <canvas id="game"></canvas>
+    <div class="hud">
+      <div class="bars">
+        <div class="bar"><span>❤️</span><div class="track"><div id="hp-fill" class="fill hp"></div></div></div>
+        <div class="bar" id="energy-bar"><span>⚡</span><div class="track"><div id="en-fill" class="fill en"></div></div></div>
+      </div>
+      <div class="pill">🪙 <span id="f-coins">0</span></div>
+      <div class="pill">📏 <span id="f-alt">0</span> m</div>
+      <button class="btn round home" id="btn-home" aria-label="Back to garage">🏠</button>
+    </div>
+    <div class="controls">
+      <button class="btn round boost" id="btn-boost">BOOST<br>🚀</button>
+      <button class="btn round barrier" id="btn-barrier">BARRIER<br>🔵</button>
+    </div>
+    <div class="toasts" id="toasts"></div>
+  </section>
+
+  <div class="modal hidden" id="summary">
+    <div class="card">
+      <h2 id="s-title">Crash!</h2>
+      <p id="s-body"></p>
+      <button class="btn launch" id="btn-back">Back to garage 🔧</button>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
