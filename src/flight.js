@@ -1,5 +1,7 @@
 import { PARTS, WEAPONS, CELL } from './parts.js';
 import { computeStats, coinRate, rollCrate } from './rocket.js';
+import { ENEMIES, BOSSES, BOSS_ORDER, rocketPower, threatLevel, enemyScale, makeEnemy, makeBoss, pickEnemyType, pickBoss } from './enemies.js';
+import { checkAchievements } from './achievements.js';
 import { makeRocketSprite } from './draw.js';
 import { Input } from './input.js';
 
@@ -7,6 +9,28 @@ const $ = id => document.getElementById(id);
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+const isDead = t => t.dead || (t.owner && t.owner.dead);
+
+function nearest(list, x, y, range) {
+  let best = null, bd = range;
+  for (const t of list) {
+    const d = Math.hypot(t.x - x, t.y - y) - t.r;
+    if (d < bd) { bd = d; best = t; }
+  }
+  return best;
+}
+
+// Boss bodies have several hittable parts; area attacks should hurt a boss once.
+function uniqueOwners(list) {
+  const seen = new Set();
+  return list.filter(t => { const o = t.owner || t; if (seen.has(o)) return false; seen.add(o); return true; });
+}
+
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy || 1;
+  const t = clamp(((px - ax) * dx + (py - ay) * dy) / l, 0, 1);
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
 
 const EARTH_R = 1400;
 const METERS = 0.5; // altitude meters per world unit
@@ -18,6 +42,15 @@ const LANDMARKS = [
   { name: 'Saturn', alt: 20000, x: 900, r: 340, color: '#e3c27a', ring: true, emoji: '🪐' },
   { name: 'Neptune', alt: 32000, x: -600, r: 300, color: '#3f6fd8', ring: false, emoji: '🔵' },
 ];
+
+function drawStar(ctx, x, y, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = rot + i * Math.PI / 5, d = i % 2 ? r * 0.45 : r;
+    ctx.lineTo(x + Math.cos(a) * d, y + Math.sin(a) * d);
+  }
+  ctx.closePath(); ctx.fill();
+}
 
 export class Flight {
   constructor({ onEnd }) {
@@ -44,6 +77,10 @@ export class Flight {
     this.engines = s.cells.filter(c => PARTS[c.part].thrust);
     this.rocket = { x: 0, y: -s.radius, vx: 0, vy: 0, a: 0, hp: s.hp, energy: s.energyMax, inv: 0, cooldowns: s.weapons.map(() => rand(0, 0.3)) };
     this.meteors = []; this.shots = []; this.pickups = []; this.particles = [];
+    this.enemies = []; this.enemyShots = []; this.beams = []; this.rings = []; this.boss = null;
+    this.power = rocketPower(s); this.threat = threatLevel(this.power, 0); this.hasWeapons = s.weapons.length > 0;
+    this.spawnE = 0; this.bossTimer = 60; this.bossCount = 0; this.kills = 0; this.bossKills = []; this.achievements = [];
+    $('bossbar').classList.add('hidden');
     this.time = 0; this.coins = 0; this.maxAlt = 0; this.unlocks = [];
     this.spawnM = 0; this.spawnP = 0; this.shake = 0; this.over = false; this.crashT = 0;
     this.reached = new Set();
@@ -150,6 +187,10 @@ export class Flight {
     this.updateWeapons(dt);
     this.updateShots(dt);
     this.updateMeteors(dt);
+    this.updateEnemies(dt);
+    this.updateBoss(dt);
+    this.updateEnemyShots(dt);
+    this.cleanupDead();
     this.updatePickups(dt);
     r.inv = Math.max(0, r.inv - dt);
     this.updateHud();
@@ -169,8 +210,9 @@ export class Flight {
       const d = vr + rand(40, 160);
       return [r.x + Math.cos(ang) * d, r.y + Math.sin(ang) * d];
     };
+    this.threat = threatLevel(this.power, this.time);
     if (alt > 120) {
-      const rate = Math.min(3.5, 0.5 + this.time / 35 + alt / 8000);
+      const rate = Math.min(3.5, 0.5 + this.time / 35 + alt / 8000) * (this.boss ? 0.5 : 1);
       this.spawnM += dt * rate;
       while (this.spawnM > 1 && this.meteors.length < 60) {
         this.spawnM -= 1;
@@ -180,6 +222,19 @@ export class Flight {
         const speed = rand(40, 110) + Math.min(120, this.time * 0.8);
         this.addMeteor(x, y, size, Math.cos(toR) * speed, Math.sin(toR) * speed);
       }
+    }
+    if (alt > 300 && this.time > 12) {
+      const rate = Math.min(1.6, 0.1 + this.threat * 0.09) * (this.boss ? 0.35 : 1);
+      this.spawnE += dt * rate;
+      while (this.spawnE > 1 && this.enemies.length < 25) {
+        this.spawnE -= 1;
+        const [x, y] = ring();
+        this.spawnEnemy(pickEnemyType(this.threat), x, y);
+      }
+    }
+    if (!this.boss && this.hasWeapons && alt > 300) {
+      this.bossTimer -= dt;
+      if (this.bossTimer <= 0) this.spawnBoss();
     }
     this.spawnP += dt * 0.9;
     while (this.spawnP > 1 && this.pickups.length < 25) {
@@ -194,13 +249,42 @@ export class Flight {
     const near = e => Math.hypot(e.x - r.x, e.y - r.y) < far;
     this.meteors = this.meteors.filter(near);
     this.pickups = this.pickups.filter(near);
+    this.enemies = this.enemies.filter(near);
+    this.enemyShots = this.enemyShots.filter(near);
+    if (this.boss && Math.hypot(this.boss.x - r.x, this.boss.y - r.y) > vr * 5) {
+      this.toast(`${this.boss.emoji} The ${this.boss.name} lost you…`);
+      this.boss = null;
+      this.bossTimer = 45;
+      $('bossbar').classList.add('hidden');
+    }
   }
 
   addMeteor(x, y, size, vx, vy) {
-    const n = 9;
+    const n = 9, sc = enemyScale(this.threat || 1);
     const verts = Array.from({ length: n }, (_, i) => [i / n * Math.PI * 2, size * rand(0.75, 1.15)]);
-    this.meteors.push({ x, y, vx, vy, r: size, hp: size * 1.2, verts, rot: 0, spin: rand(-1.5, 1.5), hit: 0,
+    this.meteors.push({ kind: 'meteor', x, y, vx, vy, r: size, hp: size * 1.2 * sc.hp, dmgMult: sc.dmg, verts, rot: 0, spin: rand(-1.5, 1.5), hit: 0,
       color: `hsl(${rand(15, 35)}, ${rand(15, 35)}%, ${rand(28, 42)}%)` });
+  }
+
+  spawnEnemy(type, x, y) {
+    this.enemies.push(makeEnemy(type, x, y, this.threat));
+  }
+
+  spawnBoss() {
+    const id = pickBoss(this.save, this.bossCount);
+    const tier = Math.floor(this.bossCount / BOSS_ORDER.length) * 2 + this.bossCount * 0.3;
+    const r = this.rocket, a = rand(0, Math.PI * 2), d = this.viewRadius() + 150;
+    this.boss = makeBoss(id, r.x + Math.cos(a) * d, r.y + Math.sin(a) * d, this.threat, tier);
+    this.bossCount += 1;
+    this.bossHitTaken = false;
+    this.shake = 10;
+    this.toast(`⚠️ BOSS: ${this.boss.emoji} ${this.boss.name}!`);
+    $('boss-name').textContent = `${this.boss.emoji} ${this.boss.name}`;
+    $('bossbar').classList.remove('hidden');
+  }
+
+  enemyShoot(x, y, a, speed, dmg, color, radius = 5) {
+    this.enemyShots.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, dmg, color, r: radius, life: 5 });
   }
 
   toWorld(lx, ly) {
@@ -208,71 +292,155 @@ export class Flight {
     return [r.x + lx * c - ly * s, r.y + lx * s + ly * c];
   }
 
+  targets() {
+    return [...this.meteors, ...this.enemies, ...(this.boss ? this.boss.parts : [])].filter(t => !isDead(t));
+  }
+
+  hurt(t, dmg) {
+    const o = t.owner || t;
+    if (o.dead) return;
+    o.hp -= dmg; o.hit = 0.1;
+  }
+
   updateWeapons(dt) {
-    const r = this.rocket;
+    const r = this.rocket, targets = this.targets();
     this.stats.weapons.forEach((w, i) => {
       r.cooldowns[i] -= dt;
       if (r.cooldowns[i] > 0) return;
       const spec = WEAPONS[w.type];
       const [wx, wy] = this.toWorld(w.lx, w.ly);
-      let best = null, bd = spec.range;
-      for (const m of this.meteors) {
-        const d = Math.hypot(m.x - wx, m.y - wy) - m.r;
-        if (d < bd) { bd = d; best = m; }
+      if (spec.kind === 'pulse') {
+        const R = spec.range + this.stats.radius;
+        const hits = uniqueOwners(targets.filter(t => Math.hypot(t.x - r.x, t.y - r.y) < R + t.r));
+        if (!hits.length) return;
+        r.cooldowns[i] = spec.cooldown;
+        hits.forEach(t => this.hurt(t, spec.damage));
+        this.rings.push({ x: r.x, y: r.y, from: this.stats.radius, to: R, life: 0.45, max: 0.45, color: spec.color });
+        return;
       }
+      const best = nearest(targets, wx, wy, spec.range);
       if (!best) return;
       r.cooldowns[i] = spec.cooldown;
       const ang = Math.atan2(best.y - wy, best.x - wx);
-      const count = spec.count || 1;
-      for (let k = 0; k < count; k++) {
-        const a = ang + (k - (count - 1) / 2) * (spec.spread || 0);
-        this.shots.push({ x: wx, y: wy, vx: Math.cos(a) * spec.speed + r.vx, vy: Math.sin(a) * spec.speed + r.vy,
-          type: w.type, life: spec.range / spec.speed * 1.4, target: best, px: wx, py: wy });
+      if (spec.kind === 'chain') {
+        const pts = [[wx, wy]], owners = new Set();
+        let cur = best;
+        while (cur && owners.size < spec.chains) {
+          owners.add(cur.owner || cur);
+          pts.push([cur.x, cur.y]);
+          this.hurt(cur, spec.damage);
+          cur = nearest(targets.filter(t => !owners.has(t.owner || t)), cur.x, cur.y, spec.chainRange);
+        }
+        this.beams.push({ pts, color: spec.color, width: 3, life: 0.2, max: 0.2, jagged: true });
+      } else if (spec.kind === 'beam') {
+        const ex = wx + Math.cos(ang) * spec.range, ey = wy + Math.sin(ang) * spec.range;
+        const hits = uniqueOwners(targets.filter(t => segDist(t.x, t.y, wx, wy, ex, ey) < t.r + spec.width));
+        hits.forEach(t => { this.hurt(t, spec.damage); this.puff(t.x, t.y, spec.color, 8, 120); });
+        this.beams.push({ pts: [[wx, wy], [ex, ey]], color: spec.color, width: spec.width, life: 0.3, max: 0.3 });
+        this.rocket.vx -= Math.cos(ang) * 30; this.rocket.vy -= Math.sin(ang) * 30;
+      } else {
+        const count = spec.count || 1;
+        for (let k = 0; k < count; k++) {
+          const a = ang + (k - (count - 1) / 2) * (spec.spread || 0);
+          this.shots.push({ x: wx, y: wy, vx: Math.cos(a) * spec.speed + r.vx, vy: Math.sin(a) * spec.speed + r.vy,
+            type: w.type, life: spec.range / spec.speed * 1.4, target: best, hitSet: spec.pierce ? new Set() : null });
+        }
       }
     });
   }
 
   updateShots(dt) {
+    const targets = this.targets();
     for (const s of this.shots) {
       const spec = WEAPONS[s.type];
       s.life -= dt;
-      s.px = s.x; s.py = s.y;
-      if (spec.homing && s.target && this.meteors.includes(s.target)) {
-        const want = Math.atan2(s.target.y - s.y, s.target.x - s.x);
-        const cur = Math.atan2(s.vy, s.vx);
-        const na = cur + clamp(wrapAngle(want - cur), -spec.homing * dt, spec.homing * dt);
-        s.vx = Math.cos(na) * spec.speed; s.vy = Math.sin(na) * spec.speed;
-      }
-      if (s.type === 'missile' && Math.random() < 0.7) this.puff(s.x, s.y, '#ffb347', 1, 15);
-      s.x += s.vx * dt; s.y += s.vy * dt;
-      for (const m of this.meteors) {
-        if (Math.hypot(m.x - s.x, m.y - s.y) < m.r + spec.radius) {
-          m.hp -= spec.damage; m.hit = 0.1; s.life = 0;
-          this.puff(s.x, s.y, spec.color, 6, 80);
-          if (s.type === 'missile') for (const o of this.meteors) if (o !== m && Math.hypot(o.x - s.x, o.y - s.y) < 70 + o.r) o.hp -= spec.damage / 2;
-          break;
+      if (spec.homing) {
+        if (!s.target || isDead(s.target)) s.target = nearest(targets.filter(t => !isDead(t)), s.x, s.y, 500);
+        if (s.target) {
+          const want = Math.atan2(s.target.y - s.y, s.target.x - s.x);
+          const cur = Math.atan2(s.vy, s.vx);
+          const na = cur + clamp(wrapAngle(want - cur), -spec.homing * dt, spec.homing * dt);
+          s.vx = Math.cos(na) * spec.speed; s.vy = Math.sin(na) * spec.speed;
         }
+      }
+      if ((s.type === 'missile' || s.type === 'star') && Math.random() < 0.7) this.puff(s.x, s.y, s.type === 'star' ? '#fff9c4' : '#ffb347', 1, 15);
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      for (const t of targets) {
+        if (isDead(t) || s.hitSet?.has(t.owner || t)) continue;
+        if (Math.hypot(t.x - s.x, t.y - s.y) >= t.r + spec.radius) continue;
+        this.hurt(t, spec.damage);
+        this.puff(s.x, s.y, spec.color, 6, 80);
+        if (spec.splash) for (const o of uniqueOwners(targets)) if (o !== t && Math.hypot(o.x - s.x, o.y - s.y) < spec.splash + o.r) this.hurt(o, spec.damage / 2);
+        if (spec.pierce) s.hitSet.add(t.owner || t);
+        else { s.life = 0; break; }
       }
     }
     this.shots = this.shots.filter(s => s.life > 0);
+    this.cleanupDead();
+  }
+
+  cleanupDead() {
     const alive = [];
     for (const m of this.meteors) {
-      if (m.hp > 0) { alive.push(m); continue; }
+      if (m.hp > 0 && !m.dead) { alive.push(m); continue; }
+      if (!m.dead) this.save.stats.meteors += 1;
+      m.dead = true;
       this.explode(m);
       if (m.r > 30) for (let k = 0; k < 2; k++) {
         const a = rand(0, Math.PI * 2);
-        this.addMeteorTo(alive, m.x + Math.cos(a) * m.r / 2, m.y + Math.sin(a) * m.r / 2, m.r * 0.5, m.vx + Math.cos(a) * 60, m.vy + Math.sin(a) * 60);
+        const before = this.meteors;
+        this.meteors = alive;
+        this.addMeteor(m.x + Math.cos(a) * m.r / 2, m.y + Math.sin(a) * m.r / 2, m.r * 0.5, m.vx + Math.cos(a) * 60, m.vy + Math.sin(a) * 60);
+        this.meteors = before;
       }
       if (Math.random() < 0.45) this.pickups.push({ x: m.x, y: m.y, vx: m.vx * 0.3, vy: m.vy * 0.3, type: 'coin', t: 0 });
     }
     this.meteors = alive;
+    const living = [];
+    let killed = false;
+    for (const e of this.enemies) {
+      if (e.hp > 0) { living.push(e); continue; }
+      e.dead = true; killed = true;
+      this.save.stats.ships += 1;
+      this.kills += 1;
+      this.puff(e.x, e.y, '#ff7043', 18, 180);
+      this.puff(e.x, e.y, '#fff176', 10, 120);
+      this.pickups.push({ x: e.x, y: e.y, vx: e.vx * 0.2, vy: e.vy * 0.2, type: 'coin', value: e.coins, big: e.coins >= 10, t: 0 });
+    }
+    this.enemies = living;
+    if (this.boss && this.boss.hp <= 0) this.bossDefeated();
+    else if (killed) this.checkAch();
   }
 
-  addMeteorTo(list, x, y, size, vx, vy) {
-    const before = this.meteors;
-    this.meteors = list;
-    this.addMeteor(x, y, size, vx, vy);
-    this.meteors = before;
+  bossDefeated() {
+    const b = this.boss, def = BOSSES[b.id];
+    b.dead = true;
+    this.boss = null;
+    this.bossTimer = 90;
+    $('bossbar').classList.add('hidden');
+    for (const p of b.parts) { this.puff(p.x, p.y, '#ff6a00', 25, 300); this.puff(p.x, p.y, '#ffe066', 15, 240); }
+    this.shake = 30;
+    if (navigator.vibrate) navigator.vibrate([80, 40, 120]);
+    this.save.stats.bosses[b.id] += 1;
+    if (!this.bossHitTaken) { this.save.stats.flawless += 1; this.toast('💎 Flawless! Not a single scratch!'); }
+    this.bossKills.push(b.id);
+    this.coins += b.coins;
+    this.toast(`🏆 You defeated the ${b.name}! +🪙${b.coins}`);
+    for (let i = 0; i < 12; i++) this.pickups.push({ x: b.x, y: b.y, vx: rand(-200, 200), vy: rand(-200, 200), type: 'coin', value: 5, t: 0 });
+    for (let i = 0; i < 2; i++) this.pickups.push({ x: b.x, y: b.y, vx: rand(-120, 120), vy: rand(-120, 120), type: 'crate', t: 0 });
+    if (def.unlock && !this.save.unlocked.includes(def.unlock)) {
+      this.save.unlocked.push(def.unlock);
+      this.unlocks.push(def.unlock);
+      this.toast(`🎁 Boss reward: ${PARTS[def.unlock].icon} ${PARTS[def.unlock].name}!`);
+    }
+    this.checkAch();
+  }
+
+  checkAch() {
+    for (const a of checkAchievements(this.save)) {
+      this.achievements.push(a);
+      this.toast(`🏅 ${a.icon} ${a.name}! +🪙${a.reward}`);
+    }
   }
 
   explode(m) {
@@ -280,40 +448,99 @@ export class Flight {
     this.puff(m.x, m.y, '#ffcc33', 8, m.r * 3);
   }
 
+  rocketTouch(x, y, rad) {
+    const r = this.rocket;
+    if (Math.hypot(x - r.x, y - r.y) > this.stats.radius + rad) return false;
+    for (const c of this.stats.cells) {
+      const [cx, cy] = this.toWorld(c.lx, c.ly);
+      if (Math.hypot(x - cx, y - cy) < rad + CELL * 0.5) return true;
+    }
+    return false;
+  }
+
+  hitRocket(dmg, fromX, fromY, knock) {
+    const r = this.rocket, d = Math.hypot(r.x - fromX, r.y - fromY) || 1;
+    r.vx += (r.x - fromX) / d * knock; r.vy += (r.y - fromY) / d * knock;
+    if (r.inv > 0 || this.over) return;
+    r.hp -= Math.max(1, Math.round(dmg));
+    r.inv = 0.6;
+    this.shake = 12;
+    if (this.boss) this.bossHitTaken = true;
+    if (navigator.vibrate) navigator.vibrate(60);
+    if (r.hp <= 0) this.crash();
+  }
+
+  barrierTouch(x, y, rad) {
+    return this.shielding && Math.hypot(x - this.rocket.x, y - this.rocket.y) < this.stats.radius + 16 + rad;
+  }
+
   updateMeteors(dt) {
-    const r = this.rocket, s = this.stats;
     for (const m of this.meteors) {
       m.x += m.vx * dt; m.y += m.vy * dt; m.rot += m.spin * dt; m.hit = Math.max(0, m.hit - dt);
     }
-    const survivors = [];
     for (const m of this.meteors) {
-      const d = Math.hypot(m.x - r.x, m.y - r.y);
-      if (d > s.radius + m.r + 30) { survivors.push(m); continue; }
-      if (this.shielding && d < s.radius + 16 + m.r) {
-        r.energy = Math.max(0, r.energy - 6);
+      if (this.barrierTouch(m.x, m.y, m.r)) {
+        this.rocket.energy = Math.max(0, this.rocket.energy - 6);
+        m.hp = 0;
+      } else if (this.rocketTouch(m.x, m.y, m.r * 0.85)) {
         this.explode(m);
-        this.pickups.push({ x: m.x, y: m.y, vx: 0, vy: 0, type: 'coin', t: 0 });
-        continue;
-      }
-      let hit = false;
-      for (const c of s.cells) {
-        const [cx, cy] = this.toWorld(c.lx, c.ly);
-        if (Math.hypot(m.x - cx, m.y - cy) < m.r * 0.85 + CELL * 0.5) { hit = true; break; }
-      }
-      if (!hit) { survivors.push(m); continue; }
-      this.explode(m);
-      const nx = (r.x - m.x) / (d || 1), ny = (r.y - m.y) / (d || 1);
-      r.vx += nx * m.r * 4; r.vy += ny * m.r * 4;
-      if (r.inv <= 0) {
-        const dmg = Math.round(m.r * 0.7);
-        r.hp -= dmg;
-        r.inv = 0.6;
-        this.shake = 12;
-        if (navigator.vibrate) navigator.vibrate(60);
-        if (r.hp <= 0) this.crash();
+        m.dead = true;
+        this.hitRocket(m.r * 0.7 * m.dmgMult, m.x, m.y, m.r * 4);
       }
     }
-    this.meteors = survivors;
+    this.meteors = this.meteors.filter(m => !m.dead || m.hp <= 0);
+  }
+
+  updateEnemies(dt) {
+    for (const e of this.enemies) {
+      ENEMIES[e.type].update(e, this, dt);
+      e.x += e.vx * dt; e.y += e.vy * dt; e.hit = Math.max(0, e.hit - dt);
+      if (this.barrierTouch(e.x, e.y, e.r)) {
+        this.rocket.energy = Math.max(0, this.rocket.energy - 8);
+        e.hp = 0;
+      } else if (this.rocketTouch(e.x, e.y, e.r)) {
+        e.hp = 0;
+        this.hitRocket(e.contact, e.x, e.y, 160);
+      }
+    }
+  }
+
+  updateBoss(dt) {
+    const b = this.boss;
+    if (!b) return;
+    BOSSES[b.id].update(b, this, dt);
+    b.x += b.vx * dt; b.y += b.vy * dt; b.hit = Math.max(0, b.hit - dt);
+    const r = this.rocket;
+    // Bosses catch up when left far behind, unless the rocket is boosting away.
+    const gap = Math.hypot(r.x - b.x, r.y - b.y), keep = this.viewRadius() * 0.8;
+    if (gap > keep && !this.boosting) {
+      const k = Math.min(1, (gap - keep) * 1.5 * dt / gap);
+      const mx = (r.x - b.x) * k, my = (r.y - b.y) * k;
+      b.x += mx; b.y += my;
+      if (b.trail) b.trail = b.trail.map(([x, y]) => [x + mx, y + my]);
+    }
+    for (const p of b.parts) {
+      if (this.barrierTouch(p.x, p.y, p.r)) {
+        const d = Math.hypot(r.x - p.x, r.y - p.y) || 1;
+        r.vx += (r.x - p.x) / d * 900 * dt; r.vy += (r.y - p.y) / d * 900 * dt;
+      } else if (this.rocketTouch(p.x, p.y, p.r * 0.9)) {
+        this.hitRocket(b.contact, p.x, p.y, 380);
+        break;
+      }
+    }
+    $('boss-fill').style.width = `${clamp(b.hp / b.maxHp, 0, 1) * 100}%`;
+  }
+
+  updateEnemyShots(dt) {
+    for (const s of this.enemyShots) {
+      s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+      if (this.barrierTouch(s.x, s.y, s.r)) { s.life = 0; this.puff(s.x, s.y, '#7fd3ff', 4, 60); }
+      else if (this.rocketTouch(s.x, s.y, s.r)) { s.life = 0; this.puff(s.x, s.y, s.color, 6, 80); this.hitRocket(s.dmg, s.x, s.y, 40); }
+    }
+    this.enemyShots = this.enemyShots.filter(s => s.life > 0);
+    for (const fx of [...this.beams, ...this.rings]) fx.life -= dt;
+    this.beams = this.beams.filter(b => b.life > 0);
+    this.rings = this.rings.filter(b => b.life > 0);
   }
 
   updatePickups(dt) {
@@ -336,7 +563,7 @@ export class Flight {
 
   collect(p) {
     const r = this.rocket, s = this.stats;
-    if (p.type === 'coin') { const v = 3 + Math.floor(this.altitude / 1500); this.coins += v; this.puff(p.x, p.y, '#ffd700', 6, 60); }
+    if (p.type === 'coin') { const v = p.value ?? 3 + Math.floor(this.altitude / 1500); this.coins += v; this.puff(p.x, p.y, '#ffd700', 6, 60); }
     if (p.type === 'repair') { r.hp = Math.min(s.hp, r.hp + Math.ceil(s.hp * 0.25)); this.toast('🔧 Repaired!'); }
     if (p.type === 'energy') { r.energy = s.energyMax; if (s.hasBoost || s.hasShield) this.toast('⚡ Energy full!'); else this.coins += 3; }
     if (p.type === 'crate') {
@@ -367,7 +594,8 @@ export class Flight {
     $('flight').classList.add('hidden');
     this.input.boost = this.input.barrier = false;
     this.input.stick = null;
-    this.onEnd({ crashed, coins: Math.floor(this.coins), time: this.time, altitude: this.maxAlt, unlocks: this.unlocks });
+    this.onEnd({ crashed, coins: Math.floor(this.coins), time: this.time, altitude: this.maxAlt, unlocks: this.unlocks,
+      kills: this.kills, bossKills: this.bossKills, achievements: this.achievements });
     this.ended = false;
   }
 
@@ -404,6 +632,7 @@ export class Flight {
     $('en-fill').style.width = `${clamp(r.energy / s.energyMax, 0, 1) * 100}%`;
     $('f-coins').textContent = Math.floor(this.coins);
     $('f-alt').textContent = Math.floor(this.altitude);
+    $('f-threat').textContent = Math.floor(this.threat);
   }
 
   render() {
@@ -464,13 +693,62 @@ export class Flight {
       ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
     }
     ctx.globalAlpha = 1;
+    for (const e of this.enemies) {
+      ctx.save(); ctx.translate(e.x, e.y);
+      ENEMIES[e.type].draw(ctx, e, this.time);
+      if (e.hit > 0) { ctx.globalAlpha = 0.6; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(0, 0, e.r * 1.1, 0, Math.PI * 2); ctx.fill(); }
+      ctx.restore();
+    }
+    if (this.boss) {
+      const b = this.boss, def = BOSSES[b.id];
+      b.flash = b.hit > 0 && Math.floor(this.time * 25) % 2 === 0;
+      ctx.save();
+      if (!def.worldSpace) ctx.translate(b.x, b.y);
+      def.draw(ctx, b, this.time);
+      ctx.restore();
+    }
+    for (const s of this.enemyShots) {
+      ctx.fillStyle = s.color;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 0.4, 0, Math.PI * 2); ctx.fill();
+    }
     for (const s of this.shots) {
       const spec = WEAPONS[s.type];
-      ctx.strokeStyle = spec.color; ctx.lineWidth = spec.radius * 1.4; ctx.lineCap = 'round';
-      ctx.beginPath();
-      if (s.type === 'laser') { const l = 0.03; ctx.moveTo(s.x - s.vx * l, s.y - s.vy * l); ctx.lineTo(s.x, s.y); ctx.stroke(); }
-      else { ctx.fillStyle = spec.color; ctx.arc(s.x, s.y, spec.radius, 0, Math.PI * 2); ctx.fill(); }
+      ctx.strokeStyle = spec.color; ctx.fillStyle = spec.color; ctx.lineWidth = spec.radius * 1.4; ctx.lineCap = 'round';
+      if (s.type === 'laser') {
+        const l = 0.03;
+        ctx.beginPath(); ctx.moveTo(s.x - s.vx * l, s.y - s.vy * l); ctx.lineTo(s.x, s.y); ctx.stroke();
+      } else if (s.type === 'star') {
+        drawStar(ctx, s.x, s.y, spec.radius * 1.6, this.time * 8);
+      } else {
+        if (s.type === 'plasma') { ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.arc(s.x, s.y, spec.radius * 1.8, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
+        ctx.beginPath(); ctx.arc(s.x, s.y, spec.radius, 0, Math.PI * 2); ctx.fill();
+      }
     }
+    for (const b of this.beams) {
+      ctx.globalAlpha = clamp(b.life / b.max, 0, 1);
+      for (const [wid, col] of [[b.width * 2.2, b.color], [b.width * 0.6, '#fff']]) {
+        ctx.strokeStyle = col; ctx.lineWidth = wid; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        b.pts.forEach(([x, y], i) => {
+          if (!i) return ctx.moveTo(x, y);
+          if (b.jagged) {
+            const [px, py] = b.pts[i - 1];
+            for (let k = 1; k < 5; k++) ctx.lineTo(px + (x - px) * k / 5 + rand(-9, 9), py + (y - py) * k / 5 + rand(-9, 9));
+          }
+          ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+    }
+    for (const ring of this.rings) {
+      const k = 1 - ring.life / ring.max;
+      ctx.globalAlpha = 1 - k;
+      ctx.strokeStyle = ring.color; ctx.lineWidth = 10 * (1 - k) + 2;
+      ctx.beginPath(); ctx.arc(this.rocket.x, this.rocket.y, ring.from + (ring.to - ring.from) * k, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
 
     if (!this.over) {
       ctx.save();
@@ -503,15 +781,17 @@ export class Flight {
       ctx.fillText('👆 Touch & drag anywhere to fly!', w / 2, h * 0.78);
     }
     // Edge arrows toward nearby crates so kids can find them.
-    for (const p of this.pickups) {
-      if (p.type !== 'crate') continue;
+    const pointers = this.pickups.filter(p => p.type === 'crate').map(p => ({ x: p.x, y: p.y, color: '#ffcd03', size: 1 }));
+    if (this.boss) pointers.push({ x: this.boss.x, y: this.boss.y, color: '#ff1744', size: 1.8 });
+    for (const p of pointers) {
       const dx = (p.x - r.x) * z, dy = (p.y - r.y) * z;
       if (Math.abs(dx) < w / 2 && Math.abs(dy) < h / 2) continue;
       const a = Math.atan2(dy, dx);
       const t = Math.min((w / 2 - 30) / Math.abs(Math.cos(a) || 1e-6), (h / 2 - 30) / Math.abs(Math.sin(a) || 1e-6));
       ctx.save();
       ctx.translate(w / 2 + Math.cos(a) * t, h / 2 + Math.sin(a) * t); ctx.rotate(a);
-      ctx.fillStyle = '#ffcd03';
+      ctx.scale(p.size, p.size);
+      ctx.fillStyle = p.color;
       ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
@@ -558,6 +838,7 @@ export class Flight {
     ctx.save();
     ctx.translate(p.x, p.y + bob);
     if (p.type === 'coin') {
+      if (p.big) ctx.scale(1.5, 1.5);
       ctx.fillStyle = '#b8860b'; ctx.beginPath(); ctx.arc(0, 2, 10, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#ffd700'; ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#fff3a0'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();

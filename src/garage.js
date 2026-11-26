@@ -1,6 +1,8 @@
 import { PARTS, PART_IDS, GARAGE_SIZES, PAINTS } from './parts.js';
 import { validateBuild, computeStats, tryPlace, tryRemove, tryUpgradeGarage } from './rocket.js';
 import { drawBrick } from './draw.js';
+import { ACHIEVEMENTS } from './achievements.js';
+import { rocketPower } from './enemies.js';
 
 const $ = id => document.getElementById(id);
 
@@ -19,6 +21,8 @@ export class Garage {
       this.say(r.ok ? 'Bigger garage! More room for bricks! 🎉' : r.reason);
       this.changed();
     };
+    $('btn-achievements').onclick = () => this.showAchievements();
+    $('btn-ach-close').onclick = () => $('achievements').classList.add('hidden');
     $('btn-reset').onclick = () => { if (confirm('Erase all progress and start over?')) onReset(); };
     window.addEventListener('resize', () => this.visible && this.render());
     this.renderPaints();
@@ -33,6 +37,15 @@ export class Garage {
   }
 
   hide() { this.visible = false; $('garage').classList.add('hidden'); }
+
+  showAchievements() {
+    $('ach-list').innerHTML = ACHIEVEMENTS.map(a => {
+      const got = this.save.achievements.includes(a.id);
+      return `<div class="ach${got ? '' : ' locked'}"><div class="icon">${got ? a.icon : '🔒'}</div>
+        <div><b>${a.name}</b><div>${a.desc}</div><div class="reward">${got ? '✅ Earned' : `Reward: 🪙 ${a.reward}`}</div></div></div>`;
+    }).join('');
+    $('achievements').classList.remove('hidden');
+  }
 
   say(text) { $('g-hint').textContent = text; }
 
@@ -119,13 +132,14 @@ export class Garage {
     $('btn-launch').disabled = !v.ok;
     $('g-coins').textContent = Math.floor(this.save.coins);
     $('g-best').textContent = Math.floor(this.save.best);
+    $('btn-achievements').textContent = `🏆 Achievements ${this.save.achievements.length}/${ACHIEVEMENTS.length}`;
     const next = GARAGE_SIZES[this.save.garage + 1];
     $('btn-upgrade').textContent = next ? `Bigger garage ${next.w}×${next.h} (🪙 ${next.price})` : 'Max garage size!';
     $('btn-upgrade').disabled = !next || this.save.coins < next.price;
 
     const s = computeStats(this.save.bricks);
     const count = t => s.weapons.filter(w => w.type === t).length;
-    const weapons = ['laser', 'blaster', 'missile'].filter(count).map(t => `${PARTS[t].icon}×${count(t)}`).join(' ') || 'none';
+    const weapons = PART_IDS.filter(id => PARTS[id].weapon).map(id => PARTS[id].weapon).filter(count).map(t => `${PARTS[t].icon}×${count(t)}`).join(' ') || 'none';
     $('stats').innerHTML = `
       <div>❤️ Health: <b>${s.hp}</b></div>
       <div>⚖️ Weight: <b>${s.mass.toFixed(1)}</b></div>
@@ -133,6 +147,7 @@ export class Garage {
       <div>🔄 Turning: <b>${s.turnRate.toFixed(1)}</b></div>
       <div>⚡ Energy: <b>${s.energyMax}</b></div>
       <div>🔫 Weapons: <b>${weapons}</b></div>
+      <div>💪 Power: <b>${Math.round(rocketPower(s))}</b></div>
       <div>${s.hasBoost ? '🚀 Boost ✓' : ''} ${s.hasShield ? '🔵 Barrier ✓' : ''}</div>`;
   }
 }

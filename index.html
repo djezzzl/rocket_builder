@@ -28,6 +28,7 @@
         <div class="stats" id="stats"></div>
         <div class="errors" id="errors"></div>
         <button class="btn secondary" id="btn-upgrade"></button>
+        <button class="btn trophy" id="btn-achievements"></button>
         <button class="btn launch" id="btn-launch">LAUNCH! 🚀</button>
         <button class="btn tiny" id="btn-reset">Start over</button>
       </aside>
@@ -43,7 +44,12 @@
       </div>
       <div class="pill">🪙 <span id="f-coins">0</span></div>
       <div class="pill">📏 <span id="f-alt">0</span> m</div>
+      <div class="pill" title="Danger level">☠️ <span id="f-threat">1</span></div>
       <button class="btn round home" id="btn-home" aria-label="Back to garage">🏠</button>
+    </div>
+    <div class="bossbar hidden" id="bossbar">
+      <div class="bossname" id="boss-name"></div>
+      <div class="track"><div id="boss-fill" class="fill boss"></div></div>
     </div>
     <div class="controls">
       <button class="btn round boost" id="btn-boost">BOOST<br>🚀</button>
@@ -57,6 +63,14 @@
       <h2 id="s-title">Crash!</h2>
       <p id="s-body"></p>
       <button class="btn launch" id="btn-back">Back to garage 🔧</button>
+    </div>
+  </div>
+
+ <div class="modal hidden" id="achievements">
+    <div class="card wide">
+      <h2>🏆 Achievements</h2>
+      <div class="ach-list" id="ach-list"></div>
+      <button class="btn launch" id="btn-ach-close">Close</button>
     </div>
   </div>
 

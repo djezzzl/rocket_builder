@@ -98,7 +98,7 @@ export function tryUpgradeGarage(save) {
 }
 
 export function rollCrate(save, rand = Math.random) {
-  const locked = Object.keys(PARTS).filter(id => !save.unlocked.includes(id));
+  const locked = Object.keys(PARTS).filter(id => !save.unlocked.includes(id) && !PARTS[id].bossOnly);
   if (locked.length && rand() < 0.7) {
     const part = locked[Math.floor(rand() * locked.length)];
     save.unlocked.push(part);

@@ -92,3 +92,16 @@ html, body {
 .card { background: #ffcd03; color: #1b2a34; border-radius: 20px; padding: 24px 32px; text-align: center; max-width: 90vw; box-shadow: 0 10px 0 #b08d00; }
 .card h2 { font-size: 2rem; margin: 0 0 8px; }
 .card p { font-size: 1.2rem; line-height: 1.6; }
+
+.bossbar { position: absolute; top: calc(env(safe-area-inset-top) + 70px); left: 50%; transform: translateX(-50%); width: min(70vw, 520px); text-align: center; pointer-events: none; }
+.bossname { font-weight: bold; font-size: 1.2rem; text-shadow: 0 2px 4px #000; margin-bottom: 4px; }
+.bossbar .track { height: 18px; border: 2px solid #ff1744; }
+.fill.boss { background: linear-gradient(90deg, #b71c1c, #ff1744); }
+.toasts { top: 130px; }
+.btn.trophy { background: #923978; }
+.card.wide { width: min(92vw, 640px); max-height: 90vh; display: flex; flex-direction: column; }
+.ach-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; overflow-y: auto; margin: 8px 0 16px; text-align: left; touch-action: pan-y; }
+.ach { display: flex; gap: 10px; align-items: center; background: rgba(0,0,0,.12); border-radius: 12px; padding: 8px 10px; }
+.ach .icon { font-size: 2rem; }
+.ach.locked { opacity: .45; filter: grayscale(1); }
+.ach .reward { font-size: .85rem; opacity: .8; }

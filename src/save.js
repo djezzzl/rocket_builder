@@ -8,6 +8,8 @@ export function newSave() {
     garage: 0,
     best: 0,
     flights: 0,
+    achievements: [],
+    stats: { meteors: 0, ships: 0, flawless: 0, bosses: { king: 0, mother: 0, kraken: 0, dragon: 0 } },
     unlocked: Object.keys(PARTS).filter(id => PARTS[id].unlocked),
     bricks: [
       { x: 1, y: 1, part: 'cockpit', color: 'auto' },
@@ -19,7 +21,11 @@ export function newSave() {
 export function loadSave() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...newSave(), ...JSON.parse(raw) };
+    if (raw) {
+      const base = newSave(), data = JSON.parse(raw);
+      const stats = { ...base.stats, ...data.stats, bosses: { ...base.stats.bosses, ...data.stats?.bosses } };
+      return { ...base, ...data, stats };
+    }
   } catch { /* corrupted save: start fresh */ }
   return newSave();
 }
